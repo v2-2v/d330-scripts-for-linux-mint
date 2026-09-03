@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=D330 Auto Rotate (right-up/left-up only)
+Comment=Flips the D330 screen 180 degrees based on the accelerometer; only reacts to right-up/left-up, ignores normal/bottom-up
+Exec=/usr/local/bin/d330-auto-rotate.sh
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
