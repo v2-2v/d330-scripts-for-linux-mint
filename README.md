@@ -1,0 +1,1 @@
+# linux_lenovod330-linuxmint-login-backlight-only-fix
