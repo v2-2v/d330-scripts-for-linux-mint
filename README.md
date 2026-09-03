@@ -1,31 +1,51 @@
-# D330 Linux Mintログイン時に画面がバックライトのみになる問題とその修正
+# D330 Linux Mint: backlight-only screen at login, and a fix
 
 ## TL;DR
 
-- Lenovo IdeaPad D330-10IGM + Linux Mint 22.3（Cinnamon）で、**ログイン画面（lightdm greeter）からデスクトップへ入る瞬間に、画面がバックライトのみ（表示なし）になることがある**問題を切り分けた。
-- 原因は、[サスペンド/DPMS復帰時の黒画面バグ](https://github.com/v2-2v/linux_lenovod330)（本機種のDSIパネル固有の既知の不具合）と**同じ根本原因**で、トリガーが異なるだけだった。ログイン画面はカーネル/BIOSが渡した状態（`fastset`）をそのまま使うため安全だが、Cinnamonのウィンドウマネージャ（muffin）がセッション開始時に画面を自動回転（縦→横）させる際に、初めて本物のi915側DSI再初期化コードが走り、確率的に失敗することがある。
-- 対策として、**ログイン画面の時点で先に同じ回転をかけておく**（lightdmの`display-setup-script`フックを使用）ことで、デスクトップ移行時の「状態変化」＝モードセット自体をなくす方向で緩和を試みた。ログイン画面が横向きになることは確認済みだが、発生確率自体が下がったかどうかの統計的な検証は今後の課題。
-- **[linux_lenovod330](https://github.com/v2-2v/linux_lenovod330)リポジトリのDKMSパッチ（サスペンド/DPMS用）とは独立**しており、あちらを導入していないストックカーネルでも本問題は発生し、本修正は単独で有効。
+- On Lenovo IdeaPad D330-10IGM + Linux Mint 22.3 (Cinnamon), the screen can
+  come up **backlight-only (no image) right at the moment you log in** —
+  going from the lightdm greeter into the Cinnamon desktop.
+- Root cause: **the same underlying bug** as the [suspend/DPMS black-screen
+  bug](https://github.com/v2-2v/linux_lenovod330) on this panel — just
+  triggered differently. The greeter reuses the BIOS-handed-off display
+  state (`fastset`), which is safe. But Cinnamon's window manager (muffin)
+  auto-rotates the screen once at session start, and *that* forces a real
+  modeset — the first time i915's own (probabilistically unreliable) DSI
+  re-init code actually runs.
+- Fix: make the greeter apply the **same rotation up front** (via lightdm's
+  `display-setup-script` hook), so there's no orientation *change* — and
+  therefore no modeset — at the login→desktop transition. Confirmed: the
+  greeter now shows landscape. Whether this measurably reduces the
+  black-screen rate hasn't been statistically verified yet.
+- **Independent of the [linux_lenovod330](https://github.com/v2-2v/linux_lenovod330)
+  DKMS patch** (which targets suspend/DPMS) — this issue reproduces on a
+  completely stock, unmodified kernel, and this fix works standalone or
+  alongside that other repo.
 
 ---
 
-## 環境
+## Environment
 
-- 機種: Lenovo IdeaPad D330-10IGM
-- OS: Linux Mint 22.3（Cinnamon、X11、lightdm + lightdm-gtk-greeter）
-- カーネル: `7.0.0-30-generic`（ストック、無改造）
+- Model: Lenovo IdeaPad D330-10IGM
+- OS: Linux Mint 22.3 (Cinnamon, X11, lightdm + lightdm-gtk-greeter)
+- Kernel: `7.0.0-30-generic` (stock, unmodified)
 - GPU: Intel Gemini Lake, UHD Graphics 600
-- 内蔵ディスプレイ: DSI-1接続、物理パネルモード`800x1280@60`（ネイティブ縦）
+- Internal display: DSI-1, native physical panel mode `800x1280@60` (portrait)
 
-## 症状
+## Symptom
 
-- ログイン画面（lightdm greeter）は正常に表示される（**縦向き**）。
-- ログインしてCinnamonデスクトップに入る瞬間、画面が**バックライトのみ**になり、表示が出ないことがある（毎回ではなく確率的）。
-- 発生した場合、再ログイン・再起動すれば直ることが多い（[サスペンド復帰バグ](https://github.com/v2-2v/linux_lenovod330)と同様、再起動＝真の電源再投入経路は確実に成功する）。
+- The lightdm greeter (login screen) displays fine — in **portrait**.
+- Logging in and transitioning to the Cinnamon desktop, the screen
+  sometimes comes up **backlight-only** — no image (not every time;
+  probabilistic).
+- When it happens, logging in again or rebooting usually recovers it (same
+  as the [suspend bug](https://github.com/v2-2v/linux_lenovod330) — a real
+  power cycle reliably works).
 
-## 原因の切り分け
+## Root-cause diagnosis
 
-まず、ログイン画面とデスクトップとで**画面の向きが違う**ことに着目した（ログイン画面＝縦、デスクトップ＝横）。
+The first thing that stood out: the greeter and the desktop are in
+**different orientations** (greeter = portrait, desktop = landscape).
 
 ```bash
 $ xrandr --verbose
@@ -37,42 +57,64 @@ DSI1 connected primary 1280x800+0+0 (0x47) right (normal left inverted right x a
   800x1280 (0x47) 78.500MHz -HSync -VSync *current +preferred
 ```
 
-ここで重要なのは`panel orientation: Right Side Up`という**カーネル（i915）のDRMコネクタプロパティ**の存在である。これはVBTに埋め込まれた「このパネルは物理的に90度回転して実装されている」という情報で、ネイティブモードは`800x1280`（縦）のまま、ディスプレイサーバ側がこのプロパティを見て自動的に補正回転をかけることを想定した仕組みである。
+The key detail is `panel orientation: Right Side Up` — a **DRM connector
+property from the kernel (i915)** itself. It's derived from VBT data saying
+"this panel is physically mounted rotated 90°"; the native mode stays
+`800x1280` (portrait), and the display server is expected to read this
+property and apply a compensating rotation automatically.
 
-切り分けのため、以下を確認した：
+To narrow it down further, checked:
 
-- `~/.config/monitors.xml`：存在しない（保存済みの画面配置設定が原因ではない）
-- `/etc/X11/xorg.conf.d/`：回転関連の静的設定は無し
-- `org.cinnamon.settings-daemon.peripherals.touchscreen orientation-lock`：`true`（加速度センサーによる動的な自動回転ではない）
-- Xorgログ：`intel_drv.so`（レガシーintelドライバ）がロードされている
+- `~/.config/monitors.xml`: doesn't exist (not a saved per-user layout)
+- `/etc/X11/xorg.conf.d/`: no static rotation config
+- `org.cinnamon.settings-daemon.peripherals.touchscreen orientation-lock`:
+  `true` (rules out dynamic accelerometer-based auto-rotate)
+- Xorg log: `intel_drv.so` (the legacy `intel` driver) is loaded
 
-**結論**：`panel orientation`プロパティを実際に読んで自動補正回転をかけているのは、**Cinnamonのウィンドウマネージャmuffin（Mutter系）自身**であり、これはセッション開始時に一度だけ発生する。一方、lightdmのgreeter（`lightdm-gtk-greeter`、単純なX11クライアントでMutter系コンポジタではない）はこの補正機能を持たないため、ネイティブの縦のまま表示される。
+**Conclusion**: it's **Cinnamon's window manager, muffin** (a Mutter fork)
+that actually reads the `panel orientation` property and applies the
+compensating rotation — once, at session start. The lightdm greeter
+(`lightdm-gtk-greeter`, a plain X11 client, not a Mutter-based compositor)
+has no such logic, so it stays in the raw native portrait orientation.
 
-つまり：
+In other words:
 
 ```
-[greeter起動]                         [ログイン→Cinnamon起動]
-状態: 800x1280、無回転                状態: 800x1280、無回転
-（BIOSが渡したfastset状態のまま）  →  muffinがxrandr --rotate rightを発行
-                                        ↓
-                                   実モードセット発生
-                                        ↓
-                                   fastsetが無効化され、
-                                   i915自身のDSI再初期化コードが
-                                   初めて実行される
-                                        ↓
-                                   確率的に失敗（既知のバグ）
+[greeter starts]                      [login -> Cinnamon starts]
+state: 800x1280, no rotation          state: 800x1280, no rotation
+(still the BIOS-handed-off       ->   muffin issues xrandr --rotate right
+ fastset state)                             |
+                                       real modeset happens
+                                             |
+                                       fastset is invalidated; i915's own
+                                       DSI re-init code runs for the
+                                       first time
+                                             |
+                                       fails probabilistically (known bug)
 ```
 
-これは[サスペンド/DPMS復帰時の黒画面バグ](https://github.com/v2-2v/linux_lenovod330)と**全く同じ経路**（i915の`intel_dsi_disable()`→`intel_dsi_pre_enable()`という、パネル電源/リセットGPIOを再操作しDSIプロトコルを再確立する処理）であり、トリガーが「サスペンド復帰」ではなく「ログイン直後の初回モードセット（回転変更）」だった、というだけである。
+This is **exactly the same code path** as the [suspend/DPMS black-screen
+bug](https://github.com/v2-2v/linux_lenovod330) — i915's
+`intel_dsi_disable()` → `intel_dsi_pre_enable()`, which re-toggles the
+panel power/reset GPIOs and re-establishes the DSI protocol — just
+triggered by "the first modeset after login (a rotation change)" instead
+of "resuming from suspend."
 
-## 修正方法
+## The fix
 
-根本のi915側バグ自体は直せない（[別リポジトリ](https://github.com/v2-2v/linux_lenovod330)の結論と同じ）ため、**トリガーとなるモードセット自体を起こさない**方向で対策する。具体的には、lightdmのgreeterが起動した時点で、Cinnamonが後で行うのと同じ回転を先にかけておき、ログイン画面からデスクトップまで**状態を一貫させる**（＝ログイン時にモードセットが発生しないようにする）。
+The underlying i915 bug itself can't be fixed (same conclusion as the
+[other repo](https://github.com/v2-2v/linux_lenovod330)), so this instead
+avoids the *trigger*: the modeset itself. Specifically, have the greeter
+apply the same rotation Cinnamon will apply anyway, before it even draws —
+so the state stays consistent all the way from greeter to desktop, and no
+modeset happens at login at all.
 
-`display-setup-script`は、greeter用のXサーバーが起動した直後、greeterの描画が始まる**前**にroot権限で実行される。ここで先に`xrandr --rotate right`を実行しておくことで、greeter自体が最初から横向きで表示されるようになる。
+`display-setup-script` runs, as root, right after the greeter's X server
+comes up but **before** the greeter starts drawing. Running
+`xrandr --rotate right` there means the greeter itself starts out already
+in landscape.
 
-### インストール（コピペで完結）
+### Install (copy-paste)
 
 ```bash
 git clone https://github.com/v2-2v/linux_lenovod330-linuxmint-login-backlight-only-fix.git
@@ -84,7 +126,7 @@ sudo install -m 644 scripts/90-d330-rotate.conf /etc/lightdm/lightdm.conf.d/90-d
 sudo reboot
 ```
 
-`scripts/d330-lightdm-rotate.sh`の中身:
+`scripts/d330-lightdm-rotate.sh`:
 
 ```sh
 #!/bin/sh
@@ -96,42 +138,62 @@ sudo reboot
 xrandr --output DSI1 --rotate right
 ```
 
-`scripts/90-d330-rotate.conf`の中身:
+`scripts/90-d330-rotate.conf`:
 
 ```ini
 [Seat:*]
 display-setup-script=/etc/lightdm/d330-lightdm-rotate.sh
 ```
 
-再起動すると、lightdmの再起動（ログアウト状態になる、既存セッションは失われる）を伴うので注意。
+Rebooting restarts lightdm, so any existing session is lost — same caveat
+as any other display-manager-affecting change.
 
-### 取り除く場合
+### Removing it
 
 ```bash
 sudo rm -f /etc/lightdm/d330-lightdm-rotate.sh /etc/lightdm/lightdm.conf.d/90-d330-rotate.conf
 sudo reboot
 ```
 
-## 検証状況
+## Verification status
 
-- ✅ **確認済み**：上記適用後、ログイン画面（greeter）が横向きで表示されるようになった。
-- ❓ **未検証**：ログイン→デスクトップ移行時のモードセット自体（あるいはそれに類する処理）がまだ内部的に発生していないか、発生していてもgreeterと状態が同一なため実際に失敗しにくくなっているか、という点は、少数回の試行だけでは判断できない。[サスペンド復帰バグの調査](https://github.com/v2-2v/linux_lenovod330)で確立された知見（「確率的なハードウェアレベルのマージン不足」であり、成功率は条件次第で大きくばらつく）を踏まえると、統計的な確認には多数回のログイン試行が必要。
+- ✅ **Confirmed**: after applying this, the greeter now displays in
+  landscape.
+- ❓ **Not yet verified**: whether the login→desktop transition still
+  triggers some equivalent internal processing (or whether keeping the
+  greeter and desktop state identical actually makes it less likely to
+  fail) can't be judged from a handful of tries. Per the findings from the
+  [suspend-bug investigation](https://github.com/v2-2v/linux_lenovod330)
+  (a probabilistic hardware-margin issue whose success rate varies a lot
+  by conditions), confirming this statistically will need many login
+  attempts.
 
-## `linux_lenovod330`リポジトリとの関係
+## Relation to `linux_lenovod330`
 
-同じ機種・同じ根本原因（DSIパネルの電源/初期化シーケンスが確率的に失敗する、というGeminiLake + i915 + VBT駆動DSIパネルの構造的な弱点）を共有しているが、対策のアプローチは別物：
+Same model, same underlying root cause (the structural weakness of
+GeminiLake + i915 + a VBT-driven DSI panel, where the panel's power/init
+sequence fails probabilistically) — but a different mitigation approach for
+a different trigger:
 
-| | 対象トリガー | 対策 |
+| | Trigger | Fix |
 |---|---|---|
-| [linux_lenovod330](https://github.com/v2-2v/linux_lenovod330) | サスペンド復帰・DPMS off/on | カーネルパッチでバックライトGPIOを独立制御し、そもそもパネル電源サイクルを踏ませない |
-| 本ドキュメント | ログイン→デスクトップ移行時の自動回転 | greeter側の回転をデスクトップ側と揃え、モードセット自体を発生させない |
+| [linux_lenovod330](https://github.com/v2-2v/linux_lenovod330) | Resuming from suspend, or DPMS off/on | Kernel patch: control the backlight GPIO independently, so the panel power cycle is never touched at all |
+| This document | Auto-rotation on the login→desktop transition | Align the greeter's rotation with the desktop's, so no modeset happens at login |
 
-いずれも「バグそのものを直す」のではなく「バグの発火条件（トリガー）を回避する」というアプローチである点は共通している。**本修正はカーネル無改造のストック環境でも単独で有効**であり、`linux_lenovod330`のDKMSパッチと併用しても問題ない。
+Both are "avoid the trigger" fixes rather than "fix the bug itself." **This
+fix works standalone on a completely stock kernel**, and is safe to use
+alongside the `linux_lenovod330` DKMS patch.
 
-## 今後の課題
+## Future work
 
-- 数十回単位のログイン試行を行い、対策前後で黒画面の発生率が実際に下がったかを統計的に確認する。
-- 対策後も発生する場合、`drm.debug=0x1e`を有効にしてログイン時のログを取得し、`Starting MIPI sequence`が実際に出ているか（＝モードセットが依然として発生しているか）を確認する。
-- 可能であれば、lightdm-gtk-greeter以外の、`panel orientation`プロパティを自動的に尊重するgreeter（Mutter/GNOME Shellベースのgreeter等）への切り替えも根本対策として検討の余地がある。
+- Run dozens of login attempts to statistically confirm whether the
+  black-screen rate actually dropped after this fix.
+- If it still happens, capture login-time logs with `drm.debug=0x1e` and
+  check whether `Starting MIPI sequence` still appears (i.e. whether a
+  modeset is still occurring somehow).
+- Consider switching to a greeter that natively respects the `panel
+  orientation` property (e.g. a Mutter/GNOME-Shell-based greeter) as a more
+  fundamental alternative.
 
-（本ドキュメントは個人の調査記録であり、Lenovo/Intelの公式見解ではありません。）
+(This document is a personal investigation log, not an official statement
+from Lenovo or Intel.)
