@@ -47,8 +47,9 @@
 The first thing that stood out: the greeter and the desktop are in
 **different orientations** (greeter = portrait, desktop = landscape).
 
-```bash
-$ xrandr --verbose
+Run `xrandr --verbose`; excerpt of the output:
+
+```
 DSI1 connected primary 1280x800+0+0 (0x47) right (normal left inverted right x axis y axis) 135mm x 216mm
 ...
 	panel orientation: Right Side Up
